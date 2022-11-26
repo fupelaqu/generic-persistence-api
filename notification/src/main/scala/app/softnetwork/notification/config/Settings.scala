@@ -32,7 +32,10 @@ case class MailConfig(host: String,
                       sslCheckServerIdentity: Boolean,
                       startTLSEnabled: Boolean,
                       socketConnectionTimeout: Int = 2000,
-                      socketTimeout: Int = 2000)
+                      socketTimeout: Int = 2000,
+                      from: String,
+                      name: String,
+                      signature: String)
 
 case class PushConfig(apns: ApnsConfig, gcm: GcmConfig, fcm: FcmConfig)
 
