@@ -412,15 +412,16 @@ trait AccountBehavior[T <: Account with AccountDecorator, P <: Profile]
                 case Some(account) =>
                   import account._
                   if(checkEncryption(credentials, oldPassword)){
+                    val notifications = sendPasswordUpdated(generateUUID(), state.get)
                     Effect.persist[AccountEvent, Option[T]](
-                      PasswordUpdatedEvent(
-                        entityId,
-                        encrypt(newPassword),
-                        account.verificationCode,
-                        account.verificationToken
-                      ).withLastUpdated(now())
+                      notifications.toList :+
+                        PasswordUpdatedEvent(
+                          entityId,
+                          encrypt(newPassword),
+                          account.verificationCode,
+                          account.verificationToken
+                        ).withLastUpdated(now())
                     ).thenRun(state => {
-                        sendPasswordUpdated(generateUUID(), state.get)
                         PasswordUpdated(state.get)
                       } ~> replyTo)
                   }
@@ -513,18 +514,19 @@ trait AccountBehavior[T <: Account with AccountDecorator, P <: Profile]
               }
             }
             else{
+              val notifications = sendPrincipalUpdated(generateUUID(), account)
               Effect.persist(
-                List(
-                  LoginUpdatedEvent(
-                    uuid = entityId,
-                    principal = principal
-                  ).withLastUpdated(now())
-                ) ++
-                account.profiles.map(kv =>
-                  createProfileUpdatedEvent(entityId, kv._2.copyWithPrincipal(principal).asInstanceOf[P], Some(true))
-                )
+                notifications.toList ++
+                  List(
+                    LoginUpdatedEvent(
+                      uuid = entityId,
+                      principal = principal
+                    ).withLastUpdated(now())
+                  ) ++
+                  account.profiles.map(kv =>
+                    createProfileUpdatedEvent(entityId, kv._2.copyWithPrincipal(principal).asInstanceOf[P], Some(true))
+                  )
               ).thenRun(_ => {
-                sendPrincipalUpdated(generateUUID(), account)
                 LoginUpdated ~> replyTo
               })
             }
@@ -647,23 +649,31 @@ trait AccountBehavior[T <: Account with AccountDecorator, P <: Profile]
         else { // wrong password
           val nbLoginFailures = account.nbLoginFailures + 1
           val disabled = nbLoginFailures > maxLoginFailures // disable account
-          Effect.persist[AccountEvent, Option[T]](
-            if (disabled)
-              AccountDisabledEvent(
-                entityId,
-                nbLoginFailures
-              ).withLastUpdated(now())
-            else
-              LoginFailed(
-                entityId,
-                nbLoginFailures
-              ).withLastUpdated(now())
+          val notifications: List[AccountToNotificationCommandEvent] =
+            if(disabled && ! account.status.isDisabled){
+              log.info(s"reset password required for ${account.primaryPrincipal.value}")
+              sendAccountDisabled(generateUUID(), account).toList
+            }
+            else{
+              List.empty
+            }
+          Effect.persist(
+            if (disabled) {
+              notifications :+
+                AccountDisabledEvent(
+                  entityId,
+                  nbLoginFailures
+                ).withLastUpdated(now())
+            } else {
+              List(
+                LoginFailed(
+                  entityId,
+                  nbLoginFailures
+                ).withLastUpdated(now())
+              )
+            }
           ).thenRun(_ => {
             if (disabled) {
-              if (!account.status.isDisabled) {
-                log.info(s"reset password required for ${account.primaryPrincipal.value}")
-                sendAccountDisabled(generateUUID(), account)
-              }
               AccountDisabled
             }
             else {
@@ -674,8 +684,7 @@ trait AccountBehavior[T <: Account with AccountDecorator, P <: Profile]
         }
       case Some(account) if account.status.isDisabled =>
         log.info(s"reset password required for ${account.primaryPrincipal.value}")
-        sendAccountDisabled(generateUUID(), account)
-        Effect.none.thenRun(_ => AccountDisabled ~> replyTo)
+        Effect.persist(sendAccountDisabled(generateUUID(), account).toList).thenRun(_ => AccountDisabled ~> replyTo)
       case None => Effect.none.thenRun(_ => LoginAndPasswordNotMatched ~> replyTo) //WrongLogin
       case _ => Effect.none.thenRun(_ => IllegalStateError ~> replyTo)
     }
